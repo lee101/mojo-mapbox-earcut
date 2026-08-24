@@ -31,17 +31,17 @@ The returned `uint32` triples index `vertices`. Available functions are `triangu
 
 ## Coverage
 
-Covered and tested: simple polygons in either winding direction, concave outlines, multiple holes, and collinear or repeated vertices. The public Python surface has the four typed functions provided by upstream `mapbox_earcut`: `triangulate_float32`, `triangulate_float64`, `triangulate_int32`, and `triangulate_int64`. Tests exercise every entry point on convex polygons and polygons with a hole; the float64 tests additionally exercise the other listed shapes and SIMD tail lengths.
+Covered and tested: simple polygons in either winding direction, concave outlines, multiple holes, and collinear or repeated vertices. The public Python surface has the four typed functions provided by upstream `mapbox_earcut`: `triangulate_float32`, `triangulate_float64`, `triangulate_int32`, and `triangulate_int64`. Tests exercise every entry point on convex polygons and polygons with a hole; the float64 tests additionally exercise the other listed shapes, SIMD tail lengths, both sides of the spatial-index threshold, and indexed polygons with holes.
 
-Not covered: self-intersecting polygons, arbitrary 3D projection, and upstream's z-order spatial index. Input must be a planar `(n, 2)` numeric array and strictly increasing integer ring ends that fit `uint32`; coordinate conversions that would lose precision are rejected. Self-intersections do not have a well-defined filled region without a separate fill-rule operation. Omitting the z-order index trades large-polygon throughput for a compact single Mojo compilation unit.
+Not covered: self-intersecting polygons, arbitrary 3D projection, and upstream's final degeneracy-recovery and polygon-splitting passes. Input must be a planar `(n, 2)` numeric array and strictly increasing integer ring ends that fit `uint32`; coordinate conversions that would lose precision are rejected. Self-intersections do not have a well-defined filled region without a separate fill-rule operation.
 
 ## How it works
 
-The kernel stores polygon vertices in one contiguous `float64` `(n, 2)` array. Python validates dimensions, integer ring ends, and lossless conversion before passing raw buffer addresses to one C-ABI Mojo export through `ctypes`; the NumPy arrays remain live for the full native call. Caller-owned `Int64` arrays hold `prev`, `next`, and source-index fields for a circular doubly linked list; contiguous initialization uses SIMD with a scalar tail. Joining a hole duplicates its two bridge endpoints in that scratch space; clipped triangle indices are written into a caller-owned output buffer and returned as `uint32`.
+The kernel stores polygon vertices in one contiguous `float64` `(n, 2)` array. Python validates dimensions, integer ring ends, and lossless conversion before passing raw buffer addresses to one C-ABI Mojo export through `ctypes`; already-contiguous `float64` vertices and `uint32` ring ends cross that boundary without copies. Caller-owned `Int64` arrays hold linked-list and spatial-index fields. Contiguous ring initialization and signed-area accumulation use native-width SIMD with scalar tails. Polygons above 80 vertices build a z-order linked index so ear tests inspect only spatially relevant candidates. Joining a hole duplicates its two bridge endpoints in scratch space; clipped triangle indices are written directly to a caller-owned `uint32` output buffer without a result conversion.
 
 No kernel allocation crosses the FFI boundary, and the shared library is built as `dist/libmojo-mapbox-earcut.so` by `pixi run build`.
 
-Triangulation is branch-heavy and pointer-chasing, with insufficient arithmetic intensity for a GPU path; CPU is the only execution path.
+Ear clipping is branch-heavy, pointer-chasing, and sequential: removing one ear changes the candidates for the next iteration. It has insufficient independent work for CPU thread launch overhead and far less than the roughly two flops per byte needed to justify host/device transfers, so there is no parallel or GPU path. CPU is the only execution path.
 
 ## Verification
 
@@ -54,13 +54,13 @@ The pytest suite compares triangle count, index bounds, and covered area against
 
 ## Benchmarks
 
-Measured on `Linux-6.8.0-136-generic-x86_64-with-glibc2.39 (x86_64)` using `pixi run bench` on 2026-08-02. Lower is better; speedup is `mapbox-earcut / Mojo`.
+Measured on `Linux-6.8.0-136-generic-x86_64-with-glibc2.39 (x86_64)` using `pixi run bench` on 2026-08-24. Lower is better; speedup is `mapbox-earcut / Mojo`.
 
 | kernel | Mojo | mapbox-earcut | speedup |
 | --- | ---: | ---: | ---: |
-| concave star (800 vertices) | 1.028 ms | 0.203 ms | 0.20x |
-| rectangle with 6 holes (28 vertices) | 0.079 ms | 0.007 ms | 0.09x |
+| concave star (800 vertices) | 0.231 ms | 0.182 ms | 0.79x |
+| rectangle with 6 holes (28 vertices) | 0.024 ms | 0.006 ms | 0.27x |
 
-This implementation is slower than upstream's optimized native implementation on both measured kernels. Its value here is a standalone, inspectable Mojo kernel with a compatible Python API; the missing z-order index is the principal reason the gap widens on large concave rings.
+This implementation remains slower than upstream's optimized native implementation on both measured kernels. The z-order index closes most of the large-ring gap; fixed Python validation, allocation, and FFI costs remain most visible on the 28-vertex case.
 
 MIT.

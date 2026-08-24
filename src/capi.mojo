@@ -77,13 +77,22 @@ def link_ring(start: Int, end: Int, descending: Bool, prev: IPtr, next: IPtr, in
 
 
 def linked_list(vertices: FPtr, start: Int, end: Int, clockwise: Bool, prev: IPtr, next: IPtr, indices: IPtr) -> Int:
-    var signed = Float64(0)
-    var j = end - 1
-    for i in range(start, end):
-        signed += (px(vertices, j) - px(vertices, i)) * (py(vertices, j) + py(vertices, i))
-        j = i
     if start == end:
         return -1
+    var signed = Float64(0)
+    comptime W = simd_width_of[DType.float64]()
+    var i = start
+    while i + W <= end - 1:
+        var current = vertices.load[width=W](2 * i).join(vertices.load[width=W](2 * i + W))
+        var following = vertices.load[width=W](2 * i + 2).join(vertices.load[width=W](2 * i + W + 2))
+        var x0, y0 = current.deinterleave()
+        var x1, y1 = following.deinterleave()
+        signed += (x0 * y1 - x1 * y0).reduce_add()
+        i += W
+    while i < end - 1:
+        signed += px(vertices, i) * py(vertices, i + 1) - px(vertices, i + 1) * py(vertices, i)
+        i += 1
+    signed += px(vertices, end - 1) * py(vertices, start) - px(vertices, start) * py(vertices, end - 1)
     var last = link_ring(start, end, clockwise != (signed > 0), prev, next, indices)
     if last != -1 and equals(vertices, indices, last, next[last]):
         remove_node(last, prev, next)
@@ -107,12 +116,138 @@ def is_ear(vertices: FPtr, ear: Int, prev: IPtr, next: IPtr, indices: IPtr) -> B
     var by = py(vertices, indices[b])
     var cx = px(vertices, indices[c])
     var cy = py(vertices, indices[c])
+    var x0 = min(ax, min(bx, cx))
+    var y0 = min(ay, min(by, cy))
+    var x1 = max(ax, max(bx, cx))
+    var y1 = max(ay, max(by, cy))
     var p = next[c]
     while p != a:
-        if not (px(vertices, indices[p]) == ax and py(vertices, indices[p]) == ay) and point_in_triangle(ax, ay, bx, by, cx, cy, px(vertices, indices[p]), py(vertices, indices[p])) and area(vertices, indices, prev[p], p, next[p]) >= 0:
+        var p_x = px(vertices, indices[p])
+        var p_y = py(vertices, indices[p])
+        if p_x >= x0 and p_x <= x1 and p_y >= y0 and p_y <= y1 and not (p_x == ax and p_y == ay) and point_in_triangle(ax, ay, bx, by, cx, cy, p_x, p_y) and area(vertices, indices, prev[p], p, next[p]) >= 0:
             return False
         p = next[p]
     return True
+
+
+def z_order(x_value: Float64, y_value: Float64, min_x: Float64, min_y: Float64, inv_size: Float64) -> Int:
+    var x = Int((x_value - min_x) * inv_size)
+    var y = Int((y_value - min_y) * inv_size)
+    x = (x | (x << 8)) & 0x00FF00FF
+    x = (x | (x << 4)) & 0x0F0F0F0F
+    x = (x | (x << 2)) & 0x33333333
+    x = (x | (x << 1)) & 0x55555555
+    y = (y | (y << 8)) & 0x00FF00FF
+    y = (y | (y << 4)) & 0x0F0F0F0F
+    y = (y | (y << 2)) & 0x33333333
+    y = (y | (y << 1)) & 0x55555555
+    return x | (y << 1)
+
+
+def sort_linked(list_head: Int, z: IPtr, prev_z: IPtr, next_z: IPtr) -> Int:
+    var in_size = 1
+    var result = list_head
+    while True:
+        var p = result
+        result = -1
+        var tail = -1
+        var num_merges = 0
+        while p != -1:
+            num_merges += 1
+            var q = p
+            var p_size = 0
+            for _ in range(in_size):
+                p_size += 1
+                q = next_z[q]
+                if q == -1:
+                    break
+            var q_size = in_size
+            while p_size > 0 or (q_size > 0 and q != -1):
+                var e: Int
+                if p_size != 0 and (q_size == 0 or q == -1 or z[p] <= z[q]):
+                    e = p
+                    p = next_z[p]
+                    p_size -= 1
+                else:
+                    e = q
+                    q = next_z[q]
+                    q_size -= 1
+                if tail != -1:
+                    next_z[tail] = e
+                else:
+                    result = e
+                prev_z[e] = tail
+                tail = e
+            p = q
+        next_z[tail] = -1
+        if num_merges <= 1:
+            return result
+        in_size *= 2
+
+
+def index_curve(vertices: FPtr, start: Int, min_x: Float64, min_y: Float64, inv_size: Float64, prev: IPtr, next: IPtr, indices: IPtr, z: IPtr, prev_z: IPtr, next_z: IPtr):
+    var p = start
+    while True:
+        z[p] = z_order(px(vertices, indices[p]), py(vertices, indices[p]), min_x, min_y, inv_size)
+        prev_z[p] = prev[p]
+        next_z[p] = next[p]
+        p = next[p]
+        if p == start:
+            break
+    next_z[prev_z[p]] = -1
+    prev_z[p] = -1
+    _ = sort_linked(p, z, prev_z, next_z)
+
+
+def blocks_ear(vertices: FPtr, p: Int, a: Int, c: Int, ax: Float64, ay: Float64, bx: Float64, by: Float64, cx: Float64, cy: Float64, x0: Float64, y0: Float64, x1: Float64, y1: Float64, prev: IPtr, next: IPtr, indices: IPtr) -> Bool:
+    var p_x = px(vertices, indices[p])
+    var p_y = py(vertices, indices[p])
+    return p != a and p != c and p_x >= x0 and p_x <= x1 and p_y >= y0 and p_y <= y1 and not (p_x == ax and p_y == ay) and point_in_triangle(ax, ay, bx, by, cx, cy, p_x, p_y) and area(vertices, indices, prev[p], p, next[p]) >= 0
+
+
+def is_ear_hashed(vertices: FPtr, ear: Int, min_x: Float64, min_y: Float64, inv_size: Float64, prev: IPtr, next: IPtr, indices: IPtr, z: IPtr, prev_z: IPtr, next_z: IPtr) -> Bool:
+    var a = prev[ear]
+    var c = next[ear]
+    if area(vertices, indices, a, ear, c) >= 0:
+        return False
+    var ax = px(vertices, indices[a])
+    var ay = py(vertices, indices[a])
+    var bx = px(vertices, indices[ear])
+    var by = py(vertices, indices[ear])
+    var cx = px(vertices, indices[c])
+    var cy = py(vertices, indices[c])
+    var x0 = min(ax, min(bx, cx))
+    var y0 = min(ay, min(by, cy))
+    var x1 = max(ax, max(bx, cx))
+    var y1 = max(ay, max(by, cy))
+    var min_z = z_order(x0, y0, min_x, min_y, inv_size)
+    var max_z = z_order(x1, y1, min_x, min_y, inv_size)
+    var p = prev_z[ear]
+    var n = next_z[ear]
+    while p != -1 and z[p] >= min_z and n != -1 and z[n] <= max_z:
+        if blocks_ear(vertices, p, a, c, ax, ay, bx, by, cx, cy, x0, y0, x1, y1, prev, next, indices):
+            return False
+        p = prev_z[p]
+        if blocks_ear(vertices, n, a, c, ax, ay, bx, by, cx, cy, x0, y0, x1, y1, prev, next, indices):
+            return False
+        n = next_z[n]
+    while p != -1 and z[p] >= min_z:
+        if blocks_ear(vertices, p, a, c, ax, ay, bx, by, cx, cy, x0, y0, x1, y1, prev, next, indices):
+            return False
+        p = prev_z[p]
+    while n != -1 and z[n] <= max_z:
+        if blocks_ear(vertices, n, a, c, ax, ay, bx, by, cx, cy, x0, y0, x1, y1, prev, next, indices):
+            return False
+        n = next_z[n]
+    return True
+
+
+def remove_node_indexed(node: Int, prev: IPtr, next: IPtr, prev_z: IPtr, next_z: IPtr):
+    remove_node(node, prev, next)
+    if prev_z[node] != -1:
+        next_z[prev_z[node]] = next_z[node]
+    if next_z[node] != -1:
+        prev_z[next_z[node]] = prev_z[node]
 
 
 def split_polygon(a: Int, b: Int, node_count: Int, prev: IPtr, next: IPtr, indices: IPtr) -> Int:
@@ -253,7 +388,7 @@ def eliminate_holes(vertices: FPtr, ends: UPtr, ring_count: Int, n: Int, outer: 
     return result
 
 
-def earcut(vertices: FPtr, ends: UPtr, ring_count: Int, n: Int, output: IPtr, output_capacity: Int, prev: IPtr, next: IPtr, indices: IPtr, scratch_capacity: Int, holes: IPtr, holes_capacity: Int) -> Int:
+def earcut(vertices: FPtr, ends: UPtr, ring_count: Int, n: Int, output: UPtr, output_capacity: Int, prev: IPtr, next: IPtr, indices: IPtr, z: IPtr, prev_z: IPtr, next_z: IPtr, scratch_capacity: Int, holes: IPtr, holes_capacity: Int) -> Int:
     if n < 3 or ring_count < 1 or Int(ends[ring_count - 1]) != n:
         return -1
     if output_capacity < 3 * (n + 2 * (ring_count - 1) - 2) or scratch_capacity < n + 2 * ring_count or holes_capacity < ring_count - 1:
@@ -271,26 +406,47 @@ def earcut(vertices: FPtr, ends: UPtr, ring_count: Int, n: Int, output: IPtr, ou
         return 0
     if ring_count > 1:
         outer = eliminate_holes(vertices, ends, ring_count, n, outer, prev, next, indices, holes)
+    var use_hash = n > 80
+    var min_x = Float64(0)
+    var min_y = Float64(0)
+    var inv_size = Float64(0)
+    if use_hash:
+        min_x = px(vertices, 0)
+        min_y = py(vertices, 0)
+        var max_x = min_x
+        var max_y = min_y
+        for i in range(1, Int(ends[0])):
+            min_x = min(min_x, px(vertices, i))
+            min_y = min(min_y, py(vertices, i))
+            max_x = max(max_x, px(vertices, i))
+            max_y = max(max_y, py(vertices, i))
+        var size = max(max_x - min_x, max_y - min_y)
+        if size == 0:
+            use_hash = False
+        else:
+            inv_size = 32767.0 / size
+            index_curve(vertices, outer, min_x, min_y, inv_size, prev, next, indices, z, prev_z, next_z)
     var ear = outer
     var stop = outer
     var written = 0
-    var misses = 0
     while prev[ear] != next[ear]:
         var a = prev[ear]
         var b = ear
         var c = next[ear]
-        if is_ear(vertices, ear, prev, next, indices):
-            output[written] = indices[a]
-            output[written + 1] = indices[b]
-            output[written + 2] = indices[c]
+        var ear_found = is_ear_hashed(vertices, ear, min_x, min_y, inv_size, prev, next, indices, z, prev_z, next_z) if use_hash else is_ear(vertices, ear, prev, next, indices)
+        if ear_found:
+            output[written] = UInt32(indices[a])
+            output[written + 1] = UInt32(indices[b])
+            output[written + 2] = UInt32(indices[c])
             written += 3
-            remove_node(ear, prev, next)
+            if use_hash:
+                remove_node_indexed(ear, prev, next, prev_z, next_z)
+            else:
+                remove_node(ear, prev, next)
             ear = next[c]
             stop = ear
-            misses = 0
         else:
             ear = next[ear]
-            misses += 1
             if ear == stop:
                 # Returning a partial mesh hides invalid or unsupported input.
                 return -2
@@ -298,14 +454,23 @@ def earcut(vertices: FPtr, ends: UPtr, ring_count: Int, n: Int, output: IPtr, ou
 
 
 @export("mme_triangulate_f64")
-def mme_triangulate_f64(vertices_addr: Int, ends_addr: Int, ring_count: Int, n: Int, output_addr: Int, output_capacity: Int, prev_addr: Int, next_addr: Int, indices_addr: Int, scratch_capacity: Int, holes_addr: Int, holes_capacity: Int) abi("C") -> Int:
+def mme_triangulate_f64(vertices_addr: Int, ends_addr: Int, ring_count: Int, n: Int, output_addr: Int, output_capacity: Int, scratch_addr: Int, scratch_capacity: Int, holes_addr: Int, holes_capacity: Int) abi("C") -> Int:
     # UnsafePointer is non-nullable. Validate C-ABI inputs before constructing
     # pointers so a bad caller gets an error code instead of undefined behavior.
-    if vertices_addr == 0 or ends_addr == 0 or output_addr == 0 or prev_addr == 0 or next_addr == 0 or indices_addr == 0 or holes_addr == 0:
+    if vertices_addr == 0 or ends_addr == 0 or output_addr == 0 or scratch_addr == 0 or holes_addr == 0:
         return -1
+    var stride = scratch_capacity * 8
+    var z_addr = scratch_addr + 2 * stride
+    var prev_z_addr = z_addr
+    var next_z_addr = z_addr
+    if n > 80:
+        z_addr = scratch_addr + 3 * stride
+        prev_z_addr = scratch_addr + 4 * stride
+        next_z_addr = scratch_addr + 5 * stride
     return earcut(
         FPtr(unsafe_from_address=vertices_addr), UPtr(unsafe_from_address=ends_addr), ring_count, n,
-        IPtr(unsafe_from_address=output_addr), output_capacity, IPtr(unsafe_from_address=prev_addr),
-        IPtr(unsafe_from_address=next_addr), IPtr(unsafe_from_address=indices_addr), scratch_capacity,
+        UPtr(unsafe_from_address=output_addr), output_capacity, IPtr(unsafe_from_address=scratch_addr),
+        IPtr(unsafe_from_address=scratch_addr + stride), IPtr(unsafe_from_address=scratch_addr + 2 * stride), IPtr(unsafe_from_address=z_addr),
+        IPtr(unsafe_from_address=prev_z_addr), IPtr(unsafe_from_address=next_z_addr), scratch_capacity,
         IPtr(unsafe_from_address=holes_addr), holes_capacity,
     )

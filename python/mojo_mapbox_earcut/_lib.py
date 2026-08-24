@@ -33,6 +33,6 @@ def lib() -> ctypes.CDLL:
     global _lib
     if _lib is None:
         _lib = ctypes.CDLL(build())
-        _lib.mme_triangulate_f64.argtypes = [I] * 12
+        _lib.mme_triangulate_f64.argtypes = [I] * 10
         _lib.mme_triangulate_f64.restype = I
     return _lib

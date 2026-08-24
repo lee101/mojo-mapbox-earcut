@@ -88,6 +88,16 @@ def test_large_concave_star_matches_upstream_geometry(n):
     assert_parity(vertices, np.array([n], dtype=np.uint32), mojo.triangulate_float64)
 
 
+def test_spatial_index_with_hole_matches_upstream_geometry():
+    n = 96
+    angle = (np.arange(n) + 0.13) * (2 * np.pi / n)
+    radius = 50 + 3 * np.sin(5 * angle)
+    outer = np.column_stack((radius * np.cos(angle), 0.83 * radius * np.sin(angle)))
+    hole = np.array([[-7.3, -4.1], [-6.2, 6.4], [8.7, 5.2], [7.1, -5.8]])
+    vertices = np.vstack((outer, hole))
+    assert_parity(vertices, np.array([n, n + 4], dtype=np.uint32), mojo.triangulate_float64)
+
+
 def test_empty_input_matches_upstream():
     vertices = np.empty((0, 2), dtype=np.float64)
     ends = np.empty(0, dtype=np.uint32)
@@ -121,4 +131,4 @@ def test_lossy_coordinate_or_ring_index_conversion_is_rejected():
 
 
 def test_c_abi_rejects_null_pointers_before_dereferencing():
-    assert mojo._lib.lib().mme_triangulate_f64(*([0] * 12)) == -1
+    assert mojo._lib.lib().mme_triangulate_f64(*([0] * 10)) == -1
