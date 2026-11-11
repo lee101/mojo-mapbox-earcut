@@ -83,8 +83,8 @@ def linked_list(vertices: FPtr, start: Int, end: Int, clockwise: Bool, prev: IPt
     comptime W = simd_width_of[DType.float64]()
     var i = start
     while i + W <= end - 1:
-        var current = vertices.load[width=W](2 * i).join(vertices.load[width=W](2 * i + W))
-        var following = vertices.load[width=W](2 * i + 2).join(vertices.load[width=W](2 * i + W + 2))
+        var current = vertices.unsafe_load[width=W](2 * i).join(vertices.unsafe_load[width=W](2 * i + W))
+        var following = vertices.unsafe_load[width=W](2 * i + 2).join(vertices.unsafe_load[width=W](2 * i + W + 2))
         var x0, y0 = current.deinterleave()
         var x1, y1 = following.deinterleave()
         signed += (x0 * y1 - x1 * y0).reduce_add()
